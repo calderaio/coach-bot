@@ -3,9 +3,9 @@
 Listens to messages in #coach and responds automatically via Claude.
 Also sends morning briefings and weekly review prompts via Railway cron.
 """
-
 import os
 import json
+import threading
 import requests
 from flask import Flask, request, jsonify
 import anthropic
@@ -22,7 +22,21 @@ SERPER_API_KEY = os.environ["SERPER_API_KEY"]
 COACH_CHANNEL = "C0ARJPL7P0U"
 JONAS_USER_ID = "U0ARF3U0TTL"
 
+# Deduplicate Slack event deliveries — Slack retries if we're slow
+processed_events = set()
+
 SYSTEM_PROMPT = """You are Jonas's personal coach inside his #coach Slack channel.
+
+## Your coaching personality
+Encouraging but tough. You believe in Jonas and you show it — but you don't accept excuses
+and you don't sugarcoat. When something is off, you say it clearly and move on.
+When something is good, you acknowledge it and raise the bar. No bullshit, no lectures,
+no sarcasm. Reasonable and human. Think of a coach who has seen it all and genuinely
+wants Jonas to succeed.
+
+If Jonas asks you something off-topic, just answer helpfully and briefly — you're his
+coach, not a gatekeeper.
+
 You respond to two types of messages:
 
 1. RUN DEBRIEFS — Jonas pastes run data (from Strava, Garmin, or plain text).
@@ -44,8 +58,8 @@ You respond to two types of messages:
 - Built-in races: Zürich HM Apr 12, SOLA Stafette May 16, Rheinfall-Lauf HM ~Aug 15.
 - Habits to track gently (not every message): drinking, smoking, relationship with partner.
 
-## Coaching style
-- Sharp, honest, no generic encouragement.
+## Style
+- Encouraging but no bullshit. No excuses accepted, but stay reasonable and human.
 - Reference his specific situation — the prototype, the career inflection, the race.
 - Short responses. He's busy.
 - Use Slack markdown: *bold*, _italic_."""
@@ -71,12 +85,10 @@ def send_slack_message(channel: str, text: str, thread_ts: str = None):
     payload = {"channel": channel, "text": text}
     if thread_ts:
         payload["thread_ts"] = thread_ts
-
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Authorization", f"Bearer {SLACK_BOT_TOKEN}")
     req.add_header("Content-Type", "application/json")
-
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 
@@ -90,6 +102,12 @@ def get_coach_response(user_message: str) -> str:
         messages=[{"role": "user", "content": user_message}],
     )
     return response.content[0].text
+
+
+def handle_coach_message(user_message: str, thread_ts: str):
+    """Process coach response in background thread so Slack gets fast 200."""
+    coach_reply = get_coach_response(user_message)
+    send_slack_message(COACH_CHANNEL, coach_reply, thread_ts=thread_ts)
 
 
 def open_dm_channel(user_id: str) -> str:
@@ -114,12 +132,10 @@ def build_morning_briefing() -> str:
         "space": web_search("space exploration NASA ESA SpaceX news today"),
         "switzerland": web_search("Switzerland Zurich news today"),
     }
-
     search_context = "\n\n".join(
         f"### {topic.upper()} SEARCH RESULTS:\n{results}"
         for topic, results in searches.items()
     )
-
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -170,6 +186,13 @@ def slack_events():
         return jsonify({"challenge": data["challenge"]})
 
     event = data.get("event", {})
+    event_id = data.get("event_id", "")
+
+    # Deduplicate — Slack retries if response is slow
+    if event_id and event_id in processed_events:
+        return jsonify({"ok": True})
+    if event_id:
+        processed_events.add(event_id)
 
     # Only respond to real messages from Jonas in #coach — ignore bot messages
     if (
@@ -183,9 +206,11 @@ def slack_events():
         if not user_message:
             return jsonify({"ok": True})
 
-        coach_reply = get_coach_response(user_message)
         thread_ts = event.get("thread_ts") or event.get("ts")
-        send_slack_message(COACH_CHANNEL, coach_reply, thread_ts=thread_ts)
+        # Process in background so Slack gets immediate 200
+        t = threading.Thread(target=handle_coach_message, args=(user_message, thread_ts))
+        t.daemon = True
+        t.start()
 
     return jsonify({"ok": True})
 
