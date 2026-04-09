@@ -66,7 +66,7 @@ You respond to two types of messages:
 
 
 def web_search(query: str) -> str:
-    """Search the web via Serper and return a summary of top results."""
+    """Search the web via Serper and return a summary of top results with URLs."""
     response = requests.post(
         "https://google.serper.dev/search",
         headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
@@ -76,7 +76,7 @@ def web_search(query: str) -> str:
     data = response.json()
     results = []
     for r in data.get("organic", [])[:5]:
-        results.append(f"- {r.get('title', '')}: {r.get('snippet', '')}")
+        results.append(f"- {r.get('title', '')} ({r.get('link', '')}): {r.get('snippet', '')}")
     return "\n".join(results) if results else "No results found."
 
 
@@ -147,15 +147,16 @@ def build_morning_briefing() -> str:
                     "You are a personal briefing agent. Write a concise morning briefing based on the search results below. "
                     "Use this exact structure with Slack markdown (*bold*, _italic_):\n\n"
                     "🌍 *Geopolitics*\n"
-                    "Focus on Middle East last 24-48h + other major developments (Europe, US, Asia). Factual, no opinion. 3-5 key points.\n\n"
+                    "Focus on Middle East last 24-48h + other major developments (Europe, US, Asia). Factual, no opinion. 3-5 key points. Include a source link per point.\n\n"
                     "🤖 *AI & Tech*\n"
-                    "New models, tools, product launches, industry moves. Skip hype, prioritize signal. 2-3 items.\n\n"
+                    "New models, tools, product launches, industry moves. Skip hype, prioritize signal. 2-3 items. Include a source link per item.\n\n"
                     "🗺️ *GIS & Spatial Tech*\n"
-                    "QGIS, open source geo tools, spatial data, WebGIS, geospatial industry. 1-2 items if available.\n\n"
+                    "QGIS, open source geo tools, spatial data, WebGIS, geospatial industry. 1-2 items if available. Include a source link per item.\n\n"
                     "🚀 *Space Exploration*\n"
-                    "Missions, launches, discoveries, agency news. 1-2 items.\n\n"
+                    "Missions, launches, discoveries, agency news. 1-2 items. Include a source link per item.\n\n"
                     "🇨🇭 *Switzerland & Zurich*\n"
-                    "Local news — politics, economy, city developments. 2-3 items.\n\n"
+                    "Local news — politics, economy, city developments. 2-3 items. Include a source link per item.\n\n"
+                    "Format each item as: • Item text — <url>\n\n"
                     "End with one sentence: the single most important thing to be aware of today across all topics.\n\n"
                     "Keep the full message under 4000 characters.\n\n"
                     f"{search_context}"
