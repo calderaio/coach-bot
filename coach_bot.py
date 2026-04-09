@@ -92,25 +92,57 @@ def get_coach_response(user_message: str) -> str:
     return response.content[0].text
 
 
+def open_dm_channel(user_id: str) -> str:
+    """Open a DM channel with a user and return the channel ID."""
+    url = "https://slack.com/api/conversations.open"
+    payload = json.dumps({"users": user_id}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Authorization", f"Bearer {SLACK_BOT_TOKEN}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+    return data["channel"]["id"]
+
+
 def build_morning_briefing() -> str:
-    """Fetch weather + running conditions for Zürich, then ask Claude to write a briefing."""
-    weather = web_search("Zürich weather today running conditions forecast")
-    air_quality = web_search("Zürich air quality index today")
+    """Search each topic and ask Claude to write the structured news briefing."""
+    searches = {
+        "geopolitics": web_search("Middle East geopolitics news last 24 hours"),
+        "geopolitics_global": web_search("major geopolitical developments Europe US Asia today"),
+        "ai_tech": web_search("AI artificial intelligence tech news last 48 hours"),
+        "gis": web_search("GIS geospatial QGIS WebGIS news 2026"),
+        "space": web_search("space exploration NASA ESA SpaceX news today"),
+        "switzerland": web_search("Switzerland Zurich news today"),
+    }
+
+    search_context = "\n\n".join(
+        f"### {topic.upper()} SEARCH RESULTS:\n{results}"
+        for topic, results in searches.items()
+    )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=512,
-        system=SYSTEM_PROMPT,
+        max_tokens=1500,
         messages=[
             {
                 "role": "user",
                 "content": (
-                    "Write a short morning briefing for Jonas. "
-                    "Include: today's training session (based on his Wed/Fri/Sun schedule and current marathon plan), "
-                    "whether conditions are good for running, and one sharp focus point for the day.\n\n"
-                    f"Weather search results:\n{weather}\n\n"
-                    f"Air quality search results:\n{air_quality}"
+                    "You are a personal briefing agent. Write a concise morning briefing based on the search results below. "
+                    "Use this exact structure with Slack markdown (*bold*, _italic_):\n\n"
+                    "🌍 *Geopolitics*\n"
+                    "Focus on Middle East last 24-48h + other major developments (Europe, US, Asia). Factual, no opinion. 3-5 key points.\n\n"
+                    "🤖 *AI & Tech*\n"
+                    "New models, tools, product launches, industry moves. Skip hype, prioritize signal. 2-3 items.\n\n"
+                    "🗺️ *GIS & Spatial Tech*\n"
+                    "QGIS, open source geo tools, spatial data, WebGIS, geospatial industry. 1-2 items if available.\n\n"
+                    "🚀 *Space Exploration*\n"
+                    "Missions, launches, discoveries, agency news. 1-2 items.\n\n"
+                    "🇨🇭 *Switzerland & Zurich*\n"
+                    "Local news — politics, economy, city developments. 2-3 items.\n\n"
+                    "End with one sentence: the single most important thing to be aware of today across all topics.\n\n"
+                    "Keep the full message under 4000 characters.\n\n"
+                    f"{search_context}"
                 ),
             }
         ],
@@ -160,9 +192,10 @@ def slack_events():
 
 @app.route("/cron/morning-briefing", methods=["POST"])
 def morning_briefing():
-    """Called by Railway cron — sends daily training briefing to #coach."""
+    """Called by Railway cron — sends news briefing as a DM to Jonas."""
     briefing = build_morning_briefing()
-    send_slack_message(COACH_CHANNEL, briefing)
+    dm_channel = open_dm_channel(JONAS_USER_ID)
+    send_slack_message(dm_channel, briefing)
     return jsonify({"ok": True})
 
 
