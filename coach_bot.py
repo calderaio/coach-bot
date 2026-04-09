@@ -1,10 +1,12 @@
 """
 #coach Slack Bot
 Listens to messages in #coach and responds automatically via Claude.
+Also sends morning briefings and weekly review prompts via Railway cron.
 """
 
 import os
 import json
+import requests
 from flask import Flask, request, jsonify
 import anthropic
 import urllib.request
@@ -15,6 +17,7 @@ app = Flask(__name__)
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
+SERPER_API_KEY = os.environ["SERPER_API_KEY"]
 
 COACH_CHANNEL = "C0ARJPL7P0U"
 JONAS_USER_ID = "U0ARF3U0TTL"
@@ -48,6 +51,21 @@ You respond to two types of messages:
 - Use Slack markdown: *bold*, _italic_."""
 
 
+def web_search(query: str) -> str:
+    """Search the web via Serper and return a summary of top results."""
+    response = requests.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+        json={"q": query, "num": 5, "gl": "ch", "hl": "en"},
+        timeout=10,
+    )
+    data = response.json()
+    results = []
+    for r in data.get("organic", [])[:5]:
+        results.append(f"- {r.get('title', '')}: {r.get('snippet', '')}")
+    return "\n".join(results) if results else "No results found."
+
+
 def send_slack_message(channel: str, text: str, thread_ts: str = None):
     url = "https://slack.com/api/chat.postMessage"
     payload = {"channel": channel, "text": text}
@@ -59,8 +77,8 @@ def send_slack_message(channel: str, text: str, thread_ts: str = None):
     req.add_header("Authorization", f"Bearer {SLACK_BOT_TOKEN}")
     req.add_header("Content-Type", "application/json")
 
-    with urllib.request.urlopen(req) as response:
-        return json.loads(response.read())
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 
 
 def get_coach_response(user_message: str) -> str:
@@ -72,6 +90,43 @@ def get_coach_response(user_message: str) -> str:
         messages=[{"role": "user", "content": user_message}],
     )
     return response.content[0].text
+
+
+def build_morning_briefing() -> str:
+    """Fetch weather + running conditions for Zürich, then ask Claude to write a briefing."""
+    weather = web_search("Zürich weather today running conditions forecast")
+    air_quality = web_search("Zürich air quality index today")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Write a short morning briefing for Jonas. "
+                    "Include: today's training session (based on his Wed/Fri/Sun schedule and current marathon plan), "
+                    "whether conditions are good for running, and one sharp focus point for the day.\n\n"
+                    f"Weather search results:\n{weather}\n\n"
+                    f"Air quality search results:\n{air_quality}"
+                ),
+            }
+        ],
+    )
+    return response.content[0].text
+
+
+WEEKLY_REVIEW_PROMPT = """Good evening. Weekly review time — answer these honestly:
+
+1. *Runs completed* — which sessions did you do, skip, or modify? Why?
+2. *HR discipline* — how well did you stay under 150 on easy runs?
+3. *Energy & recovery* — sleep, stress, how the body feels going into next week?
+4. *Habits* — drinking, smoking, anything worth noting?
+5. *Work/life* — prototype progress, anything weighing on you?
+
+Keep it brief. I'll give you feedback on each."""
 
 
 @app.route("/slack/events", methods=["POST"])
@@ -96,13 +151,25 @@ def slack_events():
         if not user_message:
             return jsonify({"ok": True})
 
-        # Get Claude's response
         coach_reply = get_coach_response(user_message)
-
-        # Reply in the same thread if it's a threaded message, otherwise in channel
         thread_ts = event.get("thread_ts") or event.get("ts")
         send_slack_message(COACH_CHANNEL, coach_reply, thread_ts=thread_ts)
 
+    return jsonify({"ok": True})
+
+
+@app.route("/cron/morning-briefing", methods=["POST"])
+def morning_briefing():
+    """Called by Railway cron — sends daily training briefing to #coach."""
+    briefing = build_morning_briefing()
+    send_slack_message(COACH_CHANNEL, briefing)
+    return jsonify({"ok": True})
+
+
+@app.route("/cron/weekly-review", methods=["POST"])
+def weekly_review():
+    """Called by Railway cron on Sunday evenings — posts weekly review questions."""
+    send_slack_message(COACH_CHANNEL, WEEKLY_REVIEW_PROMPT)
     return jsonify({"ok": True})
 
 
