@@ -8,6 +8,7 @@ import json
 import threading
 import datetime
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify
 import anthropic
 import urllib.request
@@ -219,25 +220,39 @@ def get_todays_training() -> str:
 # ── Morning briefing ──────────────────────────────────────────────────────────
 
 def build_morning_briefing() -> str:
-    """Search each topic and ask Claude to write the structured news briefing."""
-    searches = {
-        "geopolitics": web_search("Middle East geopolitics news last 24 hours"),
-        "geopolitics_global": web_search("major geopolitical developments Europe US Asia today"),
-        "ai_tech": web_search("AI artificial intelligence tech news last 48 hours"),
-        "gis": web_search("GIS geospatial QGIS WebGIS news 2026"),
-        "space": web_search("space exploration NASA ESA SpaceX news today"),
-        "switzerland": web_search("Switzerland Zurich news today"),
-        "weather": web_search("Zurich weather today forecast"),
-        "pollen": web_search("pollen forecast Zurich today meteoswiss"),
+    """Search each topic in parallel and ask Claude to write the structured news briefing."""
+    search_queries = {
+        "geopolitics": "Middle East geopolitics news last 24 hours",
+        "geopolitics_global": "major geopolitical developments Europe US Asia today",
+        "ai_tech": "AI artificial intelligence tech news last 48 hours",
+        "gis": "GIS geospatial QGIS WebGIS news 2026",
+        "space": "space exploration NASA ESA SpaceX news today",
+        "switzerland": "Switzerland Zurich news today",
+        "weather": "Zurich weather today forecast",
+        "pollen": "pollen forecast Zurich today meteoswiss",
     }
+
+    # Run all searches + sensor calls in parallel
+    searches = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_key = {executor.submit(web_search, q): k for k, q in search_queries.items()}
+        future_to_key[executor.submit(get_air_quality)] = "_air_quality"
+        future_to_key[executor.submit(get_air_quality_spikes)] = "_air_spikes"
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                searches[key] = future.result()
+            except Exception as e:
+                searches[key] = f"_Error: {e}_"
+
+    air_quality = searches.pop("_air_quality", "_Unavailable_")
+    air_quality_spikes = searches.pop("_air_spikes", "_Unavailable_")
+    training = get_todays_training()
+
     search_context = "\n\n".join(
         f"### {topic.upper()} SEARCH RESULTS:\n{results}"
         for topic, results in searches.items()
     )
-
-    air_quality = get_air_quality()
-    air_quality_spikes = get_air_quality_spikes()
-    training = get_todays_training()
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
@@ -338,12 +353,19 @@ def slack_events():
     return jsonify({"ok": True})
 
 
-@app.route("/cron/morning-briefing", methods=["POST"])
-def morning_briefing():
-    """Called by Railway cron — sends news briefing as a DM to Jonas."""
+def run_morning_briefing():
+    """Build and send the briefing in a background thread."""
     briefing = build_morning_briefing()
     dm_channel = open_dm_channel(JONAS_USER_ID)
     send_slack_message(dm_channel, briefing)
+
+
+@app.route("/cron/morning-briefing", methods=["POST"])
+def morning_briefing():
+    """Called by Railway cron — returns 200 immediately, builds briefing in background."""
+    t = threading.Thread(target=run_morning_briefing)
+    t.daemon = True
+    t.start()
     return jsonify({"ok": True})
 
 
